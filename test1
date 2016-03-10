@@ -53,16 +53,11 @@ LEFT JOIN	[DAR].[CubeOutput].[PRISM - Provider] PRISM 										ON ESA_Status_Da
 WHERE		ESA_Status_Data.[ECE_P12M_ProviderLevel] IN ('Yes')	
 )
 
-, BaseListZipCTE as (
-SELECT		[ESA_Status_Data].[Zip] 															as [Zip Code]	
-			,SUM(NULLIF([ECEAP_FundedChildSlots] , 0))												as [Children Served - ECEAP]
-		    ,SUM(NULLIF([HeadStart_FundedChildSlots], 0))											as [Children Served - Head Start]
-			,SUM(NULLIF([Children - License - Total Capacity], 0))								as [License Capacity By Zip Code]
-			,SUM(NULLIF([ECEAP_FundedChildSlots] , 0))/SUM(NULLIF([Children - License - Total Capacity], 0)) AS [Percent ECEAP]
-			,SUM(NULLIF([HeadStart_FundedChildSlots], 0))/SUM(NULLIF([Children - License - Total Capacity], 0)) AS [Percent Head Start]
-FROM 		[DAR].[Output_Providers].[ESA_Status_Data]	
-LEFT JOIN	[DAR_MERIT-FL].[Output_Providers].[AllProviders_AllFields] AllProviders 			ON ESA_Status_Data.[MERIT-FL_PID] = AllProviders.PID
-GROUP BY	Zip
+, ProviderByZipCTE as (
+	SELECT		[Zip Code]
+				,COUNT(DISTINCT MERIT_PID) NumberOfProviders
+	FROM 		BaseListCTE
+	GROUP BY	[Zip Code]
 )
 
 , DChildCountByMonthCTE as (
@@ -76,6 +71,21 @@ GROUP BY	Zip
 	WHERE			(DimWarrantSubmission.PaymentMonth >= @StartMonth  AND DimWarrantSubmission.PaymentMonth <= @EndMonth)
 	AND				RateDesc IN ('Infant', 'Toddler','Pre-School')
 	GROUP BY		MERIT_PID, PaymentMonth
+)
+
+, MonthByProviderCTE as (
+	SELECT 			MERIT_PID
+				  , COUNT(MERIT_PID) as NumberOfSubsidyMonths
+	FROM 			DChildCountByMonthCTE
+	GROUP BY 		MERIT_PID
+)
+
+, AverageMonthsByZipCTE as (
+	SELECT 			[Zip Code]
+				  , AVG(NumberOfSubsidyMonths) AverageMonthsOfService
+	FROM 			MonthByProviderCTE
+	JOIN 			BaseListCTE ON BaseListCTE.MERIT_PID = MonthByProviderCTE.MERIT_PID
+	GROUP BY 		[Zip Code]
 )
 
 , TotalChildrenInP12MCTE as (
@@ -95,33 +105,19 @@ GROUP BY	Zip
 					,P12MNumberOfMonthsInOperation
 )	
 
-, DChildCountByZipCTE as (
-	SELECT 			Zip
-				  , COUNT(DISTINCT FactSubsidyPayment.ChildID)		as DistinctChildrenServed
-	FROM 			[DAR_Subsidy].[Output].[DimProvider]
-	JOIN			[DAR_Subsidy].[Output].[FactSubsidyPayment]		ON DimProvider.SSPS_PID = FactSubsidyPayment.SSPS_PID
-	JOIN			[DAR_Subsidy].[Output].[DimWarrantSubmission]	ON DimWarrantSubmission.[WarrantSubmissionID] = FactSubsidyPayment.[WarrantSubmissionID]
-	JOIN 			[DAR].[Output_Providers].[ESA_Status_Data] 		ON DimProvider.SSPS_PID = ESA_Status_Data.SSPS_PID
-	WHERE			(DimWarrantSubmission.PaymentMonth >= @StartMonth  AND DimWarrantSubmission.PaymentMonth <= @EndMonth)
-	AND				RateDesc IN ('Infant', 'Toddler','Pre-School')
-	GROUP BY		Zip
-)
-
-, TotalChildrenInP12MZipCTE as (
-	SELECT  		Zip
-				  , SUM(DistinctChildrenServed) As TotalChildren
-	FROM 			DChildCountByMonthZipCTE 
-	GROUP BY 		Zip
-)
-
-, SubsidyChildrenPerMonthZipCTE as (
-	SELECT			BaseListCTE.MERIT_PID
-				  , TotalChildren / CAST(P12MNumberOfMonthsInOperation AS DECIMAL (9,2))	as [Children Served - Subsidy]		  
+, SubsidyChildrenPerZipCTE as (
+	SELECT			[Zip Code]
+				  , SUM([Children Served - Subsidy])	as NumberOfSubsidyChildrenPerZip
 	FROM			BaseListCTE
-	LEFT JOIN		TotalChildrenInP12MZipCTE												ON TotalChildrenInP12MZipCTE.Zip = BaseListCTE.Zip
-	GROUP BY		BaseListCTE.MERIT_PID
-					,TotalChildren
-					,P12MNumberOfMonthsInOperation
+	LEFT JOIN		SubsidyChildrenPerMonthCTE			ON SubsidyChildrenPerMonthCTE.MERIT_PID = BaseListCTE.MERIT_PID
+	GROUP BY		BaseListCTE.[Zip Code]
+)	
+
+, LicenseCapacityPerZipCTE as (
+	SELECT			[Zip Code]
+				  , SUM([License Capacity]) as LicenseCapacityPerZip
+	FROM			BaseListCTE
+	GROUP BY		[Zip Code]
 )	
 
 SELECT		 BaseListCTE.MERIT_PID
@@ -129,16 +125,34 @@ SELECT		 BaseListCTE.MERIT_PID
 			,[License - First Issue Date]
 			,[SubsidyProvider]
 			,[ECEAPProvider]
-			,[HeadStartProvider]
 			,[EA Participant]
-			,[County]
-			,[Zip Code]
 			,[Language - Primary]
 			,[Language - Secondary]
 			,[Children Served - ECEAP]
-		    ,[Children Served - Head Start]
 		    ,[Children Served - Subsidy]
 			,[License Capacity]
+			,CAST([Children Served - Subsidy] AS DECIMAL (9,2)) / CAST([License Capacity] AS DECIMAL (9,2)) 			as PercentSubsidyProvider
+			,CAST([Children Served - ECEAP] AS DECIMAL (9,2)) / CAST([License Capacity] AS DECIMAL (9,2)) 				as PercentECEAPProvider
 		    ,[Center-Based vs. Home-Based Care]
+			,[County]
+			,BaseListCTE.[Zip Code]
+			,NumberOfProviders																							as PerZipNumberOfProviders
+		    ,NumberOfSubsidyChildrenPerZip 																				as PerZipNumberOfSubsidyChildren
+		    ,LicenseCapacityPerZip 																						as PerZipLicenseCapacity
+		    ,CAST(NumberOfSubsidyChildrenPerZip AS DECIMAL (9,2)) / CAST(LicenseCapacityPerZip AS DECIMAL (9,2)) 		as PerZipSubsidyChildrenOverCapacity
+		    ,CAST([Children Served - Subsidy] AS DECIMAL (9,2)) / CAST(NumberOfSubsidyChildrenPerZip AS DECIMAL (9,2))	as PerZipProviderSliceOfZipCodeSubsidyPie
+			,CAST([License Capacity] AS DECIMAL (9,2)) / CAST(LicenseCapacityPerZip AS DECIMAL (9,2))					as PerZipProviderSliceOfZipCodeCapacityPie
 FROM 		 BaseListCTE
-LEFT JOIN	 SubsidyChildrenPerMonthCTE	ON SubsidyChildrenPerMonthCTE.MERIT_PID = BaseListCTE.MERIT_PID
+LEFT JOIN	 SubsidyChildrenPerMonthCTE																					ON SubsidyChildrenPerMonthCTE.MERIT_PID = BaseListCTE.MERIT_PID
+LEFT JOIN 	 SubsidyChildrenPerZipCTE																					ON SubsidyChildrenPerZipCTE.[Zip Code] = BaseListCTE.[Zip Code]
+LEFT JOIN 	 LicenseCapacityPerZipCTE																					ON LicenseCapacityPerZipCTE.[Zip Code] = BaseListCTE.[Zip Code]
+LEFT JOIN	 ProviderByZipCTE																							ON ProviderByZipCTE.[Zip Code] = BaseListCTE.[Zip Code]
+
+
+-- Fields NOT yet added
+-- •	provider’s CCA region 
+-- •	provider’s school district 
+-- •	the % of the school district’s total subsidy children served by a provider (calculated field for service desert evaluation) 
+-- •	the % of the legislative district’s total subsidy children served by a provider (calculated field for service desert evaluation) 
+-- •	languages spoken by the provider including primary language spoken and secondary language spoken (NOTE: a provider’s primary and secondary language spoken are collected in the EA application process and are available for EA participants only, for non-EA participants, which at this point includes all of the providers, primary and secondary languages will be based on languages spoken by the provider’s staff)
+-- •	year of original licensing, number of years licensed (NOTE: 3SI has not validated or reported on this data before)
