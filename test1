@@ -1,0 +1,100 @@
+DECLARE @StartMonth char(6),
+		@EndMonth char(6),
+		@EndDate char(10)
+
+SET @StartMonth =          
+      (
+      	SELECT	MonthOfWarrant
+      	FROM	(
+      			SELECT   ROW_NUMBER() OVER (ORDER BY MonthOfWarrant DESC) as RowNum
+					   , MonthOfWarrant
+				FROM     [DAR_Subsidy].Source.SSPS_Combined
+				GROUP BY MonthOfWarrant
+				) withRowNum 
+      	WHERE RowNum = 12
+      ) 
+
+; SET @EndMonth =            
+      (
+      	SELECT	MonthOfWarrant
+      	FROM	(
+      			SELECT	ROW_NUMBER() OVER (ORDER BY MonthOfWarrant DESC) as RowNum
+      				  , MonthOfWarrant
+             	FROM	[DAR_Subsidy].Source.SSPS_Combined
+             	GROUP BY MonthOfWarrant
+             	) withRowNum 
+      	WHERE RowNum = 1
+      ) 
+
+; SET @EndDate = LEFT(MIN(@EndMonth),4) + '-' + RIGHT(MIN(@EndMonth),2) + '-01'
+
+; WITH BaseListCTE as (
+SELECT		 [MERIT-FL_PID]																		as MERIT_PID
+			,ESA_Status_Data.SSPS_PID
+			,[License - First Issue Date]
+		    ,CASE	WHEN	DATEDIFF(month, [License - First Issue Date], @EndDate) <= 0		THEN NULL
+					WHEN	DATEDIFF(month, [License - First Issue Date], @EndDate) >= 12 
+						OR	DATEDIFF(month, [License - First Issue Date], @EndDate) IS NULL		THEN 12 ELSE DATEDIFF(month, [License - First Issue Date], @EndDate) END P12MNumberOfMonthsInOperation
+			,[SubsidyProvider]
+			,[ECEAPProvider]
+			,CASE WHEN [HeadStart_FundedChildSlots] IS NOT NULL 								THEN 'Yes' ELSE 'No' END [HeadStartProvider]
+			,[ESA_Status_Data].[Pipeline - EA Participant] 										as [EA Participant]
+			,[ESA_Status_Data].[County]
+			,[Language - Primary]
+			,[Language - Secondary]
+			,[ECEAP_FundedChildSlots] 															as [Children Served - ECEAP]
+		    ,[HeadStart_FundedChildSlots] 														as [Children Served - Head Start]
+			,NULLIF([Children - License - Total Capacity], 0)									as [License Capacity]
+		    ,[Center-Based vs. Home-Based Care]
+FROM 		[DAR].[Output_Providers].[ESA_Status_Data]	
+LEFT JOIN	[DAR_MERIT-FL].[Output_Providers].[AllProviders_AllFields] AllProviders 			ON ESA_Status_Data.[MERIT-FL_PID] = AllProviders.PID	
+LEFT JOIN	[DAR].[CubeOutput].[PRISM - Provider] PRISM 										ON ESA_Status_Data.[MERIT-FL_PID] = PRISM.MERIT_PID
+WHERE		ESA_Status_Data.[ECE_P12M_ProviderLevel] IN ('Yes')	
+)
+
+, DChildCountByMonthCTE as (
+	SELECT 			MERIT_PID
+				  , PaymentMonth
+				  , COUNT(DISTINCT FactSubsidyPayment.ChildID)		as DistinctChildrenServed
+	FROM 			[DAR_Subsidy].[Output].[DimProvider]
+	JOIN			[DAR_Subsidy].[Output].[FactSubsidyPayment]		ON DimProvider.SSPS_PID = FactSubsidyPayment.SSPS_PID
+	JOIN			[DAR_Subsidy].[Output].[DimWarrantSubmission]	ON DimWarrantSubmission.[WarrantSubmissionID] = FactSubsidyPayment.[WarrantSubmissionID]
+	WHERE			(DimWarrantSubmission.PaymentMonth >= @StartMonth  AND DimWarrantSubmission.PaymentMonth <= @EndMonth)
+	AND				RateDesc IN ('Infant', 'Toddler','Pre-School')
+	GROUP BY		MERIT_PID, PaymentMonth
+)
+
+, TotalChildrenInP12MCTE as (
+	SELECT  		MERIT_PID
+				  , SUM(DistinctChildrenServed) As TotalChildren
+	FROM 			DChildCountByMonthCTE 
+	GROUP BY 		MERIT_PID
+)
+
+, SubsidyChildrenPerMonthCTE as (
+	SELECT			BaseListCTE.MERIT_PID
+				  , TotalChildren / CAST(P12MNumberOfMonthsInOperation AS DECIMAL (9,2))	as [Children Served - Subsidy]		  
+	FROM			BaseListCTE
+	LEFT JOIN		TotalChildrenInP12MCTE													ON TotalChildrenInP12MCTE.MERIT_PID = BaseListCTE.MERIT_PID
+	GROUP BY		BaseListCTE.MERIT_PID
+					,TotalChildren
+					,P12MNumberOfMonthsInOperation
+)	
+
+SELECT		 BaseListCTE.MERIT_PID
+			,SSPS_PID
+			,[License - First Issue Date]
+			,[SubsidyProvider]
+			,[ECEAPProvider]
+			,[HeadStartProvider]
+			,[EA Participant]
+			,[County]
+			,[Language - Primary]
+			,[Language - Secondary]
+			,[Children Served - ECEAP]
+		    ,[Children Served - Head Start]
+		    ,[Children Served - Subsidy]
+			,[License Capacity]
+		    ,[Center-Based vs. Home-Based Care]
+FROM 		 BaseListCTE
+LEFT JOIN	 SubsidyChildrenPerMonthCTE	ON SubsidyChildrenPerMonthCTE.MERIT_PID = BaseListCTE.MERIT_PID
